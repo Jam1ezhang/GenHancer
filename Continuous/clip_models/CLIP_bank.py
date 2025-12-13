@@ -12,7 +12,7 @@ class OpenAICLIP(nn.Module):
         if config.clip_image_size == 224:
             model = CLIPModel.from_pretrained('/group/40034/jasonsjma/models_hf/clip-vit-large-patch14')
         if config.clip_image_size == 336:
-            model = CLIPModel.from_pretrained('/group/40034/jasonsjma/models_hf/clip-vit-large-patch14-336')
+            model = CLIPModel.from_pretrained('/home/user/gptdata/zym/codespace_hallucination/ckpts/clip-vit-large-patch14-336')
 
         self.project_clip = nn.Sequential(
             nn.LayerNorm(768),

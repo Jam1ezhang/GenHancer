@@ -172,3 +172,4 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+/home/user/gptdata/zym/codespace_hallucination/GenHancer/Continuous/output_OpenAICLIP_336_stage1
