@@ -172,4 +172,32 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-/home/user/gptdata/zym/codespace_hallucination/GenHancer/Continuous/output_OpenAICLIP_336_stage1
+
+# --------------------- 模型权重和检查点 --------------------- 
+# 忽略所有输出目录（包含权重文件）
+/Continuous/output_*
+
+# 忽略所有检查点文件
+*.ckpt
+*.pt
+*.pth
+*.bin
+!requirements.txt
+
+# 忽略特定的权重文件模式
+checkpoint-*.bin
+optimizer-state-*.bin
+pytorch_model.bin
+
+# 忽略模型相关的配置文件（可选，根据需要）
+# *.json
+
+# 忽略日志目录
+/logs/
+*.log
+# ---------------------------------------------------------- 
+nohup.out
+Continuous/train_configs/README_stage2_all_params.md
+Continuous/train_configs/README_video_stage2.md
+# 保留的README文件（可以根据需要保留或忽略）
+# /Continuous/train_configs/README_*.md

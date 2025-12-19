@@ -1,6 +1,6 @@
 model_name: "flux-dev"
 data_config:
-  train_batch_size: 64
+  train_batch_size: 32
   num_workers: 0  # 减少num_workers以避免分布式训练中的死锁问题
   img_size: 336
   video_dir: /home/user/data/Sth2Sth
@@ -12,9 +12,9 @@ clip_config:
   t5_dim: 4096
 report_to: tensorboard
 scale_factor: 1.0   # scaled logit-normal sampling
-train_batch_size: 64
-output_dir: output_OpenAICLIP_336_stage1/
-max_train_steps: 312
+train_batch_size: 32
+output_dir: output_OpenAICLIP_336_video_stage1_626/
+max_train_steps: 626
 learning_rate: 1e-4
 lr_scheduler: constant
 lr_warmup_steps: 10
@@ -27,7 +27,7 @@ weight_decay: 0.01
 max_grad_norm: 1.0
 logging_dir: logs
 mixed_precision: "bf16"
-checkpointing_steps: 156
+checkpointing_steps: 313
 checkpoints_total_limit: 50
 tracker_project_name: flux-lightweight
 resume_from_checkpoint: latest

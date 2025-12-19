@@ -69,6 +69,9 @@ from torchvision import transforms
 from clip_models.build_CLIP import load_clip_model_OpenAICLIP
 from clip_models.sampling import prepare_clip
 
+from peft import LoraConfig, get_peft_model
+from copy import deepcopy
+
 if is_wandb_available():
     import wandb
 logger = get_logger(__name__, log_level="INFO")
@@ -198,7 +201,36 @@ def main():
     if args.clip_config.clip_image_size == 336:
         clip_vis.model.visual_projection.weight = torch.nn.Parameter(clip_vis.model.visual_projection.weight.contiguous())
         clip_vis.model.text_projection.weight = torch.nn.Parameter(clip_vis.model.text_projection.weight.contiguous())
+    
+    # ============================================
+    # Set LoRA for efficient fine-tuning
+    # ============================================
+    lora_config = LoraConfig(
+        r=args.lora_config.r,                    # LoRA rank
+        lora_alpha=args.lora_config.lora_alpha,  # LoRA alpha
+        target_modules='all-linear',              # 对所有线性层应用 LoRA
+        lora_dropout=args.lora_config.lora_dropout,
+        bias=args.lora_config.bias,
+    )
+    clip_vis.model = get_peft_model(clip_vis.model, lora_config)
+    clip_vis.model.print_trainable_parameters()
 
+    # super model = clip_vis + dit + visual_adapter
+    super_model = SuperModel(clip_vis, dit)
+
+    # Load stage1 checkpoints
+    if hasattr(args, 'load_dir') and hasattr(args, 'load_step'):
+        print('Loading projection params from stage1...')
+        load_path_project_clip = os.path.join(args.load_dir, f"checkpoint-project-clip-{args.load_step}.bin")
+        clip_vis.project_clip.load_state_dict(torch.load(load_path_project_clip, map_location=torch.device('cpu')))
+        load_path_visual_adapter = os.path.join(args.load_dir, f"checkpoint-visual-adapter-{args.load_step}.bin")
+        super_model.visual_adapter.load_state_dict(torch.load(load_path_visual_adapter, map_location=torch.device('cpu')))
+        print('Loading projection params successfully!')
+
+        print('Loading dit params from stage1...')
+        load_path_dit = os.path.join(args.load_dir, f"checkpoint-dit-{args.load_step}.bin")
+        dit.load_state_dict(torch.load(load_path_dit, map_location=torch.device('cpu')))
+        print('Loading dit params successfully!')
 
     vae.requires_grad_(False)
     dit.requires_grad_(True)
@@ -206,21 +238,18 @@ def main():
     dit.to(accelerator.device)
     clip_vis.train()
     dit.train()
-
-    for name_, param in clip_vis.named_parameters():
-        if 'project_clip' in name_:
-            param.requires_grad = True
-        else:
-            param.requires_grad = False
-    
-
-    # super model = clip_vis + dit + visual_adapter
-    super_model = SuperModel(clip_vis, dit)
     
     # Ensure visual_adapter is trainable
     super_model.visual_adapter.requires_grad_(True)
 
     params_to_optimize = [p for p in super_model.parameters() if p.requires_grad]
+    
+    # 打印可训练参数统计
+    total_params = sum(p.numel() for p in super_model.parameters())
+    trainable_params = sum(p.numel() for p in params_to_optimize)
+    logger.info(f"Total parameters: {total_params:,}")
+    logger.info(f"Trainable parameters: {trainable_params:,}")
+    logger.info(f"Trainable ratio: {100 * trainable_params / total_params:.2f}%")
 
     optimizer = torch.optim.AdamW(
         params_to_optimize,
@@ -369,7 +398,7 @@ def main():
                     #     original_img=NORMALIZE_CLIP(end_frame).to(weight_dtype),
                     #     img=x_1.to(weight_dtype)
                     # )
-                    
+
                     with torch.no_grad():
                         # 获取 Start Frame 特征
                         # clip_vis.model 是 HF 的 CLIPModel
@@ -498,20 +527,36 @@ def main():
                     }, step=global_step)
                     train_loss = 0.0
 
-                    if global_step % args.checkpointing_steps == 0:
+                    if global_step % args.checkpointing_steps == 0 or global_step in [50, 100, 200, 300, 500, 1000, 2000, 3000]:
                         if accelerator.is_main_process:
                             unwrapped_super_model = accelerator.unwrap_model(super_model)
+                            
+                            # Save DiT
                             save_path_dit = os.path.join(args.output_dir, f"checkpoint-dit-{global_step}.bin")
+                            torch.save(deepcopy(unwrapped_super_model.dit).state_dict(), save_path_dit)
+                            
+                            # Save CLIP with LoRA merged
+                            if args.clip_config.clip_image_size == 336:
+                                save_path_clip = os.path.join(args.output_dir, f"clip-vit-large-patch14-336-{global_step}")
+                            else:
+                                save_path_clip = os.path.join(args.output_dir, f"clip-vit-large-patch14-{global_step}")
+                            save_model = deepcopy(unwrapped_super_model.clip_vis.model).merge_and_unload()
+                            save_model.save_pretrained(save_path_clip, safe_serialization=False)
+                            
+                            # Save adapters
                             save_path_project_clip = os.path.join(args.output_dir, f"checkpoint-project-clip-{global_step}.bin")
                             save_path_visual_adapter = os.path.join(args.output_dir, f"checkpoint-visual-adapter-{global_step}.bin")
-                            save_path_optimizer = os.path.join(args.output_dir, f"optimizer-state-{global_step}.bin")
-                            
-                            torch.save(deepcopy(unwrapped_super_model.dit).state_dict(), save_path_dit)
                             torch.save(deepcopy(unwrapped_super_model.clip_vis.project_clip).state_dict(), save_path_project_clip)
                             torch.save(deepcopy(unwrapped_super_model.visual_adapter).state_dict(), save_path_visual_adapter)
+                            
+                            # Save optimizer
+                            save_path_optimizer = os.path.join(args.output_dir, f"optimizer-state-{global_step}.bin")
                             torch.save(optimizer.state_dict(), save_path_optimizer)
 
                             logger.info(f"Saved checkpoint at step {global_step}")
+                            logger.info(f"  - DiT: {save_path_dit}")
+                            logger.info(f"  - CLIP (LoRA merged): {save_path_clip}")
+                            logger.info(f"  - Visual Adapter: {save_path_visual_adapter}")
 
                 logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
                 progress_bar.set_postfix(**logs)
@@ -519,13 +564,24 @@ def main():
                 if global_step >= args.max_train_steps:
                     if accelerator.is_main_process:
                         unwrapped_super_model = accelerator.unwrap_model(super_model)
-                        save_path_dit = os.path.join(args.output_dir, f"checkpoint-dit-{global_step}.bin")
-                        save_path_project_clip = os.path.join(args.output_dir, f"checkpoint-project-clip-{global_step}.bin")
-                        save_path_visual_adapter = os.path.join(args.output_dir, f"checkpoint-visual-adapter-{global_step}.bin")
                         
+                        # Save DiT
+                        save_path_dit = os.path.join(args.output_dir, f"checkpoint-dit-{global_step}.bin")
                         torch.save(deepcopy(unwrapped_super_model.dit).state_dict(), save_path_dit)
-                        torch.save(deepcopy(unwrapped_super_model.clip_vis.project_clip).state_dict(), save_path_project_clip)
+                        
+                        # Save CLIP with LoRA merged
+                        if args.clip_config.clip_image_size == 336:
+                            save_path_clip = os.path.join(args.output_dir, f"clip-vit-large-patch14-336-{global_step}")
+                        else:
+                            save_path_clip = os.path.join(args.output_dir, f"clip-vit-large-patch14-{global_step}")
+                        save_model = deepcopy(unwrapped_super_model.clip_vis.model).merge_and_unload()
+                        save_model.save_pretrained(save_path_clip, safe_serialization=False)
+                        
+                        # Save adapters
+                        save_path_visual_adapter = os.path.join(args.output_dir, f"checkpoint-visual-adapter-{global_step}.bin")
                         torch.save(deepcopy(unwrapped_super_model.visual_adapter).state_dict(), save_path_visual_adapter)
+                        
+                        logger.info(f"Final checkpoint saved at step {global_step}")
                     break
                     
             except RuntimeError as e:

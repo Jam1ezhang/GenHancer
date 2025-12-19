@@ -1,9 +1,9 @@
 model_name: "flux-dev"
 data_config:
-  train_batch_size: 16
-  num_workers: 4
+  train_batch_size: 16  # Stage2降低batch size以支持更大的模型
+  num_workers: 0  # 减少num_workers以避免分布式训练中的死锁问题
   img_size: 336
-  img_dir: /group/40033/public_datasets/CC3M/webdataset/gcc3m_shards/
+  video_dir: /home/user/data/Sth2Sth
   seed: 0
   patch_size: 1
 clip_config:
@@ -16,13 +16,14 @@ lora_config:
   lora_dropout: 0.1
   bias: "lora_only"
 report_to: tensorboard
-scale_factor: 1.0
+scale_factor: 1.0   # scaled logit-normal sampling
 train_batch_size: 16
-load_dir: output_OpenAICLIP_336_stage1/
-load_step: 100000
-output_dir: output_OpenAICLIP_336_stage2_load100000_only_lr1e-5/
-max_train_steps: 10000
-learning_rate: 1e-5
+# Stage1 checkpoint loading configuration
+load_dir: output_OpenAICLIP_336_video_stage1_313/
+load_step: 313  # 从 stage1 最后一个checkpoint加载
+output_dir: output_OpenAICLIP_336_video_stage2_all_load313/
+max_train_steps: 1000
+learning_rate: 1e-5  # Stage2使用更小的学习率进行微调
 lr_scheduler: constant
 lr_warmup_steps: 10
 adam_beta1: 0.9
@@ -34,9 +35,8 @@ weight_decay: 0.01
 max_grad_norm: 1.0
 logging_dir: logs
 mixed_precision: "bf16"
-checkpointing_steps: 500
+checkpointing_steps: 200
 checkpoints_total_limit: 50
 tracker_project_name: flux-lightweight
 resume_from_checkpoint: latest
 gradient_accumulation_steps: 2
-rank: 1

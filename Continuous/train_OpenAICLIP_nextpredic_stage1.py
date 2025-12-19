@@ -336,7 +336,7 @@ def main():
                     continue
                 
                 # 检查batch中的关键字段
-                if 'start_frame' not in batch or 'end_frame' not in batch or 'middle_frame' not in batch:
+                if 'start_frame' not in batch or 'middle_frame' not in batch:
                     logger.warning(
                         f"[Rank {accelerator.process_index}] Missing required fields in batch at step {step}"
                     )
@@ -346,52 +346,30 @@ def main():
                 
                 with accelerator.accumulate(super_model):
                     # 从视频数据中提取帧和文本
-                    start_frame = batch['start_frame'].to(accelerator.device)
-                    end_frame = batch['end_frame'].to(accelerator.device)
-                    middle_frame = batch['middle_frame'].to(accelerator.device)
-                    # prompts = batch['text']
+                    current_frame = batch['start_frame'].to(accelerator.device)  # 当前帧
+                    next_frame = batch['middle_frame'].to(accelerator.device)    # 下一帧
                     
-                    # 使用VAE对middle_frame进行编码
+                    # 使用VAE对next_frame进行编码
                     with torch.no_grad():
-                        x_1 = vae.encode(NORMALIZE_VAE(middle_frame).to(torch.float32))
+                        x_1 = vae.encode(NORMALIZE_VAE(next_frame).to(torch.float32))
 
-                    start_img_norm = NORMALIZE_CLIP(start_frame).to(weight_dtype)
-                    end_img_norm = NORMALIZE_CLIP(end_frame).to(weight_dtype)
-
-                    # # 使用CLIP处理start_frame和end_frame，并将它们的特征结合
-                    # inp_start = prepare_clip(
-                    #     clip=super_model.clip_vis,
-                    #     original_img=NORMALIZE_CLIP(start_frame).to(weight_dtype),
-                    #     img=x_1.to(weight_dtype)
-                    # )
-                    # inp_end = prepare_clip(
-                    #     clip=super_model.clip_vis,
-                    #     original_img=NORMALIZE_CLIP(end_frame).to(weight_dtype),
-                    #     img=x_1.to(weight_dtype)
-                    # )
+                    current_img_norm = NORMALIZE_CLIP(current_frame).to(weight_dtype)
                     
                     with torch.no_grad():
-                        # 获取 Start Frame 特征
+                        # 获取 Current Frame 特征
                         # clip_vis.model 是 HF 的 CLIPModel
-                        out_start = super_model.clip_vis.model.vision_model(start_img_norm, output_hidden_states=True)
+                        out_current = super_model.clip_vis.model.vision_model(current_img_norm, output_hidden_states=True)
                         # last_hidden_state: [B, Seq_Len+1, 1024] (Seq_Len=256 for 336px image)
                         # 去掉索引 0 的 CLS token，只保留 spatial tokens
-                        patches_start = out_start.last_hidden_state[:, 1:, :] 
+                        patches_current = out_current.last_hidden_state[:, 1:, :] 
 
-                        # 获取 End Frame 特征
-                        out_end = super_model.clip_vis.model.vision_model(end_img_norm, output_hidden_states=True)
-                        patches_end = out_end.last_hidden_state[:, 1:, :]
-                        
-                        # 3. 提取全局向量 vec (y) - 依然用于全局风格调制
+                        # 提取全局向量 vec (y) - 用于全局风格调制
                         # 使用 visual_projection 投影 CLS token
-                        vec_start = super_model.clip_vis.model.visual_projection(out_start.pooler_output)
-                        vec_end = super_model.clip_vis.model.visual_projection(out_end.pooler_output)
-                        # 全局向量可以取平均，或者也拼接 (看 FLUX 实现，通常 y 是单个向量，所以平均比较安全)
-                        vec_fused = (vec_start + vec_end) / 2
+                        vec_current = super_model.clip_vis.model.visual_projection(out_current.pooler_output)
+                        vec_fused = vec_current  # 只使用当前帧的全局向量
 
-                    # 4. 在序列维度拼接 Start 和 End 的 Patch
-                    # 形状变为 [B, 256+256, 1024] = [B, 512, 1024]
-                    visual_context_raw = torch.cat([patches_start, patches_end], dim=1)
+                    # 使用当前帧的 Patch 特征
+                    visual_context_raw = patches_current
 
                     # 5. 通过 Adapter 映射到 Text 空间 (1024 -> 4096)
                     # 这是我们要训练的部分，所以要有梯度
@@ -399,35 +377,26 @@ def main():
 
                     # 6. 构建 txt_ids (位置编码)
                     # 这是一个全 0 张量，或者你可以构建真实的空间坐标
-                    # 形状: [B, 512, 3]
+                    # 形状: [B, 576, 3]
                     H_patch, W_patch = 24,24
-                    # 1. 构建 Start Frame 的 IDs (t=0)
-                    ids_start = create_spatio_temporal_ids(H_patch, W_patch, time_step=0, device=accelerator.device)
+                    # 构建 Current Frame 的 IDs (t=0)
+                    ids_current = create_spatio_temporal_ids(H_patch, W_patch, time_step=0, device=accelerator.device)
                     # [576, 3]
 
-                    # 2. 构建 End Frame 的 IDs (t=2)
-                    # 为什么是 2？因为我们假设中间帧是 1。这构成了等距插值关系。
-                    ids_end = create_spatio_temporal_ids(H_patch, W_patch, time_step=2, device=accelerator.device)
-                    # [576, 3]
-
-                    # 3. 拼接 (Concatenate)
-                    # 结果形状 [1152, 3]
-                    ids_context = torch.cat([ids_start, ids_end], dim=0)
-
-                    # 4. 扩展 Batch 维度
-                    # 结果形状 [B, 1152, 3]
-                    bs = middle_frame.shape[0]
-                    txt_ids = repeat(ids_context, "l d -> b l d", b=bs).to(weight_dtype)
+                    # 扩展 Batch 维度
+                    # 结果形状 [B, 576, 3]
+                    bs = next_frame.shape[0]
+                    txt_ids = repeat(ids_current, "l d -> b l d", b=bs).to(weight_dtype)
                     # 7. 构建 img_ids (针对 target image)
                     # 我们可以复用 prepare_clip 的一部分逻辑，或者手动构建
                     # 这里为了简单，调用一次 prepare_clip 仅为了获取 img_ids，计算量很小
                     dummy_out = prepare_clip(
                         super_model.clip_vis, 
-                        start_img_norm, # 输入什么不重要，只要 shape 对
+                        current_img_norm, # 输入什么不重要，只要 shape 对
                         x_1.to(weight_dtype)
                     )
                     target_img_ids = dummy_out['img_ids']
-                    target_img_ids[..., 0] = 1.0
+                    target_img_ids[..., 0] = 1.0  # 下一帧的时间步设为 1
 
                     # 8. 组装最终输入
                     inp = {

@@ -133,14 +133,68 @@ def official_evaluation(processor, tokenizer, clip_model, model_name, benchmark_
 
 if __name__ == "__main__":
 
-    BENCHMARK_DIR = 'YOUR_MMVP_VLM_PATH'
+    BENCHMARK_DIR = '/home/user/gptdata/zym/codespace_hallucination/video_data/MMVP_VLM'
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    vision_tower_name = f'OpenAICLIP/clip-vit-large-patch14-336'
-
-    vision_tower = CLIPModel.from_pretrained(vision_tower_name, device_map=device)
-    image_processor = CLIPImageProcessor.from_pretrained(vision_tower_name)
-    tokenizer = CLIPTokenizer.from_pretrained(vision_tower_name, max_length=77)
-
-    results = official_evaluation(image_processor, tokenizer, vision_tower, vision_tower_name, BENCHMARK_DIR, device)
-    print(results)
+    
+    # --------------------- 模型加载配置 --------------------- 
+    # 原始CLIP模型名称 - 用于加载image_processor和tokenizer
+    original_clip_model = '/home/user/gptdata/zym/codespace_hallucination/ckpts/clip-vit-large-patch14-336'
+    
+    # 指定的权重文件夹 - 只用于加载模型权重
+    custom_weights_dir = f'/home/user/gptdata/zym/codespace_hallucination/ckpts/clip-vit-large-patch14-336'
+    # /home/user/gptdata/zym/codespace_hallucination/GenHancer/Continuous/output_OpenAICLIP_336_video_stage2_all_load626/clip-vit-large-patch14-336-800
+    # 友好的模型名称 - 用于结果展示
+    friendly_model_name = 'OpenAICLIP_336_Video_Stage2'
+    # ------------------------------------------------------
+    
+    # Step 1: 加载原始CLIP的image_processor和tokenizer
+    print(f"正在从{original_clip_model}加载image_processor和tokenizer...")
+    image_processor = CLIPImageProcessor.from_pretrained(original_clip_model)
+    tokenizer = CLIPTokenizer.from_pretrained(original_clip_model, max_length=77)
+    print("✅ image_processor和tokenizer加载完成")
+    
+    # Step 2: 加载模型结构并尝试加载自定义权重
+    print(f"正在从{original_clip_model}加载模型结构...")
+    vision_tower = CLIPModel.from_pretrained(original_clip_model, device_map=device)
+    
+    try:
+        print(f"尝试从{custom_weights_dir}加载自定义权重...")
+        # 尝试使用HuggingFace的from_pretrained方法加载完整模型
+        vision_tower = CLIPModel.from_pretrained(custom_weights_dir, device_map=device)
+        print("✅ 成功加载自定义完整模型")
+    except Exception as e:
+        print(f"❌ 无法加载完整模型：{e}")
+        print("尝试直接加载权重文件...")
+        
+        # 检查权重文件是否存在
+        weights_file = os.path.join(custom_weights_dir, 'pytorch_model.bin')
+        if os.path.exists(weights_file):
+            try:
+                # 直接加载权重文件
+                state_dict = torch.load(weights_file, map_location=device)
+                
+                # 处理可能的键名不匹配问题
+                if any(k.startswith('model.') for k in state_dict.keys()):
+                    state_dict = {k[6:]: v for k, v in state_dict.items()}
+                
+                # 加载权重，strict=False允许部分权重不匹配
+                vision_tower.load_state_dict(state_dict, strict=False)
+                print(f"✅ 成功从{weights_file}加载自定义权重")
+            except Exception as load_error:
+                print(f"❌ 加载权重文件失败：{load_error}")
+                print("⚠️  将使用原始CLIP模型权重")
+        else:
+            print(f"❌ 权重文件不存在：{weights_file}")
+            print("⚠️  将使用原始CLIP模型权重")
+    
+    print(f"模型设备：{device}")
+    print("模型加载完成，开始评估...")
+    
+    # Step 3: 执行评估
+    results = official_evaluation(image_processor, tokenizer, vision_tower, friendly_model_name, BENCHMARK_DIR, device)
+    print("\n评估结果：")
+    for model_name, metrics in results.items():
+        print(f"\n{model_name}:")
+        for category, accuracy in metrics.items():
+            print(f"  {category}: {accuracy:.2f}%")
