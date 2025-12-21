@@ -3,7 +3,8 @@ data_config:
   train_batch_size: 16
   num_workers: 4
   img_size: 224
-  img_dir: /group/40033/public_datasets/CC3M/webdataset/gcc3m_shards/
+  # img_dir:  /data/zby/datasets/hmdb51/hmdb51_wds_walk_triplet/
+  video_dir: /data/zby/datasets/hmdb51/hmdb51_wds_walk_triplet/
   seed: 0
   patch_size: 1
 clip_config:
@@ -14,7 +15,7 @@ report_to: tensorboard
 scale_factor: 1.0   # scaled logit-normal sampling
 train_batch_size: 16
 output_dir: output_OpenAICLIP_224_stage1/
-max_train_steps: 100000
+max_train_steps: 1000
 learning_rate: 1e-4
 lr_scheduler: constant
 lr_warmup_steps: 10
@@ -27,7 +28,7 @@ weight_decay: 0.01
 max_grad_norm: 1.0
 logging_dir: logs
 mixed_precision: "bf16"
-checkpointing_steps: 50000
+checkpointing_steps: 500
 checkpoints_total_limit: 50
 tracker_project_name: flux-lightweight
 resume_from_checkpoint: latest
