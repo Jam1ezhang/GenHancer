@@ -10,7 +10,7 @@ class OpenAICLIP(nn.Module):
         super().__init__()
 
         if config.clip_image_size == 224:
-            model = CLIPModel.from_pretrained('/group/40034/jasonsjma/models_hf/clip-vit-large-patch14')
+            model = CLIPModel.from_pretrained('openai/clip-vit-large-patch14')
         if config.clip_image_size == 336:
             model = CLIPModel.from_pretrained('/home/user/gptdata/zym/codespace_hallucination/ckpts/clip-vit-large-patch14-336')
 

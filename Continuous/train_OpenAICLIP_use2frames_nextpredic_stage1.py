@@ -280,10 +280,20 @@ def main():
             path = os.path.basename(args.resume_from_checkpoint)
         else:
             # Get the most recent checkpoint
+            import re
+
             dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1] if len(dirs) > 0 else None
+
+            # 只匹配 accelerate.save_state 生成的目录：checkpoint-123
+            ckpt_dirs = []
+            for d in dirs:
+                m = re.fullmatch(r"checkpoint-(\d+)", d)
+                if m is not None:
+                    ckpt_dirs.append((int(m.group(1)), d))
+
+            ckpt_dirs.sort(key=lambda x: x[0])
+            path = ckpt_dirs[-1][1] if len(ckpt_dirs) > 0 else None
+
 
         if path is None:
             accelerator.print(
@@ -336,44 +346,45 @@ def main():
                     continue
                 
                 # 检查batch中的关键字段
-                if 'start_frame' not in batch or 'middle_frame' not in batch:
-                    logger.warning(
-                        f"[Rank {accelerator.process_index}] Missing required fields in batch at step {step}"
-                    )
+                if 'start_frame' not in batch or 'middle_frame' not in batch or 'end_frame' not in batch:
+                    logger.warning(f"[Rank {accelerator.process_index}] Missing required fields in batch at step {step}")
                     continue
+
                 
                 step_start_time = time.time()
                 
                 with accelerator.accumulate(super_model):
                     # 从视频数据中提取帧和文本
-                    current_frame = batch['start_frame'].to(accelerator.device)  # 当前帧
-                    next_frame = batch['middle_frame'].to(accelerator.device)    # 下一帧
-                    
-                    # 使用VAE对next_frame进行编码
+                    cond0 = batch['start_frame'].to(accelerator.device)    # frame1 (或 frame0)
+                    cond1 = batch['middle_frame'].to(accelerator.device)   # frame2 (或 frame1)
+                    target = batch['end_frame'].to(accelerator.device)     # frame3 (或 frame2)  <-- GT
+
                     with torch.no_grad():
-                        x_1 = vae.encode(NORMALIZE_VAE(next_frame).to(torch.float32))
+                        x_1 = vae.encode(NORMALIZE_VAE(target).to(torch.float32))
 
-                    current_img_norm = NORMALIZE_CLIP(current_frame).to(weight_dtype)
-                    
+
+                    img0 = NORMALIZE_CLIP(cond0).to(weight_dtype)
+                    img1 = NORMALIZE_CLIP(cond1).to(weight_dtype)
+
                     with torch.no_grad():
-                        # 获取 Current Frame 特征
-                        # clip_vis.model 是 HF 的 CLIPModel
-                        out_current = super_model.clip_vis.model.vision_model(current_img_norm, output_hidden_states=True)
-                        # last_hidden_state: [B, Seq_Len+1, 1024] (Seq_Len=256 for 336px image)
-                        # 去掉索引 0 的 CLS token，只保留 spatial tokens
-                        patches_current = out_current.last_hidden_state[:, 1:, :] 
+                        out0 = super_model.clip_vis.model.vision_model(img0, output_hidden_states=True)
+                        out1 = super_model.clip_vis.model.vision_model(img1, output_hidden_states=True)
 
-                        # 提取全局向量 vec (y) - 用于全局风格调制
-                        # 使用 visual_projection 投影 CLS token
-                        vec_current = super_model.clip_vis.model.visual_projection(out_current.pooler_output)
-                        vec_fused = vec_current  # 只使用当前帧的全局向量
+                        # 只取 patch tokens，不要 CLS
+                        patches0 = out0.last_hidden_state[:, 1:, :]  # [B, L, 1024]
+                        patches1 = out1.last_hidden_state[:, 1:, :]  # [B, L, 1024]
 
-                    # 使用当前帧的 Patch 特征
-                    visual_context_raw = patches_current
+                        # 全局 vec：你可以先简单平均（也可以只用后帧）
+                        vec0 = super_model.clip_vis.model.visual_projection(out0.pooler_output)
+                        vec1 = super_model.clip_vis.model.visual_projection(out1.pooler_output)
+                        vec_fused = (vec0 + vec1) / 2
 
-                    # 5. 通过 Adapter 映射到 Text 空间 (1024 -> 4096)
-                    # 这是我们要训练的部分，所以要有梯度
+                    # cond 的视觉 token = 两帧 patch concat
+                    visual_context_raw = torch.cat([patches0, patches1], dim=1)  # [B, 2L, 1024]
+
+                    # Adapter 映射到 FLUX text-space（可训练）
                     txt_replacement = super_model.visual_adapter(visual_context_raw)
+
 
                     # 6. 构建 txt_ids (位置编码)
                     # 这是一个全 0 张量，或者你可以构建真实的空间坐标
@@ -389,40 +400,49 @@ def main():
                     # txt_ids = repeat(ids_current, "l d -> b l d", b=bs).to(weight_dtype)
 
                     # patches_current: [B, L_txt, 1024]
-                    L_txt = patches_current.shape[1]          # 224 -> 256, 336 -> 576
-                    side = int(L_txt ** 0.5)
-                    assert side * side == L_txt, f"CLIP patch tokens not square: L_txt={L_txt}"
+                    L = patches0.shape[1]
+                    side = int(L ** 0.5)
+                    assert side * side == L, f"CLIP patch tokens not square: L={L}"
 
-                    ids_current = create_spatio_temporal_ids(
-                        side, side, time_step=0, device=accelerator.device
-                    )  # [L_txt, 3]
+                    ids0 = create_spatio_temporal_ids(side, side, time_step=0, device=accelerator.device)  # 对应 cond0
+                    ids1 = create_spatio_temporal_ids(side, side, time_step=1, device=accelerator.device)  # 对应 cond1
 
-                    bs = next_frame.shape[0]
-                    txt_ids = repeat(ids_current, "l d -> b l d", b=bs).to(weight_dtype)
+                    ids_cat = torch.cat([ids0, ids1], dim=0)  # [2L, 3]
+                    bs = target.shape[0]
+                    txt_ids = repeat(ids_cat, "l d -> b l d", b=bs).to(weight_dtype)
+
+                    assert txt_replacement.shape[1] == txt_ids.shape[1], \
+                        f"txt len mismatch: txt={txt_replacement.shape[1]} vs txt_ids={txt_ids.shape[1]}"
+
 
                     # 强制 sanity check：以后再也别被 rope 追着咬
                     assert txt_replacement.shape[1] == txt_ids.shape[1], \
                         f"txt len mismatch: txt={txt_replacement.shape[1]} vs txt_ids={txt_ids.shape[1]}"
 
 
-                    # 7. 构建 img_ids (针对 target image)
-                    # 我们可以复用 prepare_clip 的一部分逻辑，或者手动构建
-                    # 这里为了简单，调用一次 prepare_clip 仅为了获取 img_ids，计算量很小
+                    # 7) 构建 img_ids (针对 target image / x_1)
+                    # 说明：
+                    # - prepare_clip 需要一个“CLIP归一化后的图像”和一个“VAE latent”(或其token化形式) 来产出 img_ids 等
+                    # - 这里我们只想要 img_ids，所以随便用 img0（cond0 的 CLIP norm 图）即可
+                    # - current_img_norm 你代码里没定义，直接删掉
                     dummy_out = prepare_clip(
-                        super_model.clip_vis, 
-                        current_img_norm, # 输入什么不重要，只要 shape 对
+                        super_model.clip_vis,
+                        img0,                    # shape 正确即可
                         x_1.to(weight_dtype)
                     )
-                    target_img_ids = dummy_out['img_ids']
-                    target_img_ids[..., 0] = 1.0  # 下一帧的时间步设为 1
+                    target_img_ids = dummy_out["img_ids"].to(weight_dtype)
 
-                    # 8. 组装最终输入
+                    # 给 target 这个“要预测的帧”打上 time_step=2 的标记（你前面 cond0/cond1 是 0/1）
+                    target_img_ids[..., 0] = 2.0
+
+                    # 8) 组装最终输入
                     inp = {
-                        'img_ids': target_img_ids,
-                        'txt': txt_replacement,  # <--- 核心：现在是 512 个视觉 Token
-                        'txt_ids': txt_ids,
-                        'vec': vec_fused         # 全局上下文
+                        "img_ids": target_img_ids,
+                        "txt": txt_replacement,   # [B, 2L, 4096] (adapter 输出)
+                        "txt_ids": txt_ids,        # [B, 2L, 3]
+                        "vec": vec_fused,          # [B, D] 全局向量
                     }
+
                     
                     x_1 = rearrange(x_1, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
                     t = torch.sigmoid(torch.randn((bs,), device=accelerator.device) * args.scale_factor)
