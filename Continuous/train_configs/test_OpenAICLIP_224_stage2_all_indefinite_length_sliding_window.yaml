@@ -1,0 +1,66 @@
+model_name: "flux-dev"
+
+data_config:
+  train_batch_size: 2
+  num_workers: 2
+  img_size: 224
+  video_dir: /data/zby/datasets/hmdb51/hmdb51_wds_walk_fullframes_fps4/
+  seed: 0
+  patch_size: 1
+  return_mode: full_frames
+  max_frames_per_video: 200
+
+clip_config:
+  clip_image_size: 224
+  clip_dim: 768
+  t5_dim: 4096
+
+lora_config:
+  r: 16
+  lora_alpha: 16
+  lora_dropout: 0.1
+  bias: "lora_only"
+
+# -------- sliding windows knobs (top-level, read by script) --------
+window_cond: 3
+window_stride: 1
+max_windows_per_video: 8
+
+# -------- mixed dilation curriculum (top-level, read by stage2 script) --------
+dilation_set: [1, 2, 3]
+dilation_probs: [0.5, 0.3, 0.2]
+dilation_warmup_ratio: 0.2
+
+report_to: tensorboard
+scale_factor: 1.0
+
+# keep consistent with data_config.train_batch_size (logging only, but avoid confusion)
+train_batch_size: 2
+
+# -------- load stage1 (sliding) --------
+load_dir: output_OpenAICLIP_224_sliding_stage1/
+load_step: 1000
+
+output_dir: output_OpenAICLIP_224_sliding_stage2_load1000_all_lr1e-5/
+
+max_train_steps: 1000
+learning_rate: 1e-5
+lr_scheduler: constant
+lr_warmup_steps: 10
+
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+
+logging_dir: logs
+mixed_precision: "bf16"
+
+checkpointing_steps: 500
+checkpoints_total_limit: 50
+tracker_project_name: flux-lightweight
+
+resume_from_checkpoint: latest
+gradient_accumulation_steps: 2
+rank: 1
