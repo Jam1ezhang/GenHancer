@@ -1,0 +1,52 @@
+model_name: "flux-dev"
+
+data_config:
+  train_batch_size: 2
+  num_workers: 2
+  img_size: 224
+  video_dir: /data/zby/datasets/hmdb51/hmdb51_wds_walk_fullframes_fps4/
+  seed: 0
+  patch_size: 1
+
+  return_mode: full_frames
+  max_frames_per_video: 200
+
+clip_config:
+  clip_image_size: 224
+  clip_dim: 768
+  t5_dim: 4096
+
+# --- sliding window (TOP LEVEL) ---
+window_cond: 3
+window_stride: 1
+max_windows_per_video: 8
+
+# --- dilation curriculum (TOP LEVEL) ---
+window_dilation_values: [1, 2, 3]
+window_dilation_probs_end: [0.5, 0.3, 0.2]
+window_dilation_warmup_ratio: 0.2
+
+report_to: tensorboard
+scale_factor: 1.0
+
+# 重要：和 data_config.train_batch_size 对齐，避免“日志 bs 和实际 bs 不一致”
+train_batch_size: 2
+
+output_dir: output_OpenAICLIP_224_sliding_stage1/
+max_train_steps: 1000
+learning_rate: 1e-4
+lr_scheduler: constant
+lr_warmup_steps: 10
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_weight_decay: 0.01
+adam_epsilon: 1e-8
+max_grad_norm: 1.0
+logging_dir: logs
+mixed_precision: "bf16"
+checkpointing_steps: 500
+checkpoints_total_limit: 50
+tracker_project_name: flux-lightweight
+resume_from_checkpoint: latest
+gradient_accumulation_steps: 2
+rank: 1

@@ -201,3 +201,8 @@ Continuous/train_configs/README_stage2_all_params.md
 Continuous/train_configs/README_video_stage2.md
 # 保留的README文件（可以根据需要保留或忽略）
 # /Continuous/train_configs/README_*.md
+# model weights
+*.safetensors
+*.ckpt
+*.pth
+*.pt
